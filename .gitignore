@@ -1,0 +1,40 @@
+# Dependencias de Node (se regeneran con "npm install" a partir de package-lock.json)
+app/node_modules/
+node_modules/
+
+# Cobertura de tests
+app/coverage/
+coverage/
+
+# Terraform: nunca subir el state (puede contener datos sensibles) ni las
+# carpetas de plugins/providers descargados
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+
+# Variables de Terraform que puedan tener datos sensibles (si alguna vez se
+# crea un .tfvars local con credenciales o ARNs propios, no debe subirse)
+*.auto.tfvars
+*.tfvars
+!*.tfvars.example
+
+# Variables de entorno locales
+.env
+.env.local
+
+# Sistema operativo / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# SBOM generado (se descarga como artifact del pipeline, no se versiona a mano)
+sbom/sbom-cyclonedx.json
+
+# Logs
+*.log
+npm-debug.log*

@@ -1,0 +1,20 @@
+# Configuracion de Prometheus para la opcion AWS.
+# A diferencia de la version local (que usa el nombre de servicio de Docker Compose,
+# "app"), en ECS el descubrimiento se resuelve via AWS Cloud Map (Service Discovery),
+# que expone un nombre DNS privado estable dentro de la VPC: app.pin-lc.local
+# Referencia oficial Cloud Map + ECS: https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-discovery.html
+# Referencia oficial Prometheus: https://prometheus.io/docs/prometheus/latest/configuration/configuration/
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'pin-lc-task-api'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['app.pin-lc.local:3000']
+
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

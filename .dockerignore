@@ -1,0 +1,12 @@
+node_modules
+npm-debug.log
+.git
+.github
+terraform
+monitoring
+docs
+sbom
+security
+*.md
+.env
+coverage

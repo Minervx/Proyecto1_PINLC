@@ -1,0 +1,362 @@
+# Pipeline CI/CD - Proyecto 1 (PIN)
+# Build & test -> Analisis de codigo (ESLint) -> Seguridad (Snyk + SBOM) ->
+# Docker build/push -> Trivy (SARIF) -> Terraform (infra local + AWS opcional) ->
+# Resumen final (crea un Issue automatico si algo fallo).
+#
+# Documentacion oficial usada como referencia:
+# - GitHub Actions: https://docs.github.com/actions
+# - actions/checkout: https://github.com/actions/checkout
+# - actions/setup-node: https://github.com/actions/setup-node
+# - Snyk Action: https://github.com/snyk/actions
+# - Anchore SBOM Action (CycloneDX/SPDX): https://github.com/anchore/sbom-action
+# - Docker Build Push Action: https://github.com/docker/build-push-action
+# - Trivy Action: https://github.com/aquasecurity/trivy-action
+# - CodeQL upload-sarif (pestaña Security): https://github.com/github/codeql-action
+# - actions/github-script: https://github.com/actions/github-script
+# - HashiCorp setup-terraform: https://github.com/hashicorp/setup-terraform
+# - aws-actions/configure-aws-credentials: https://github.com/aws-actions/configure-aws-credentials
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: app/package-lock.json
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Lint (ESLint)
+        run: npm run lint
+
+      - name: Tests unitarios
+        run: npm test
+
+      - name: Publicar reporte de cobertura
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: app/coverage
+
+  security-scan:
+    name: Analisis de seguridad
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: app/package-lock.json
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Snyk - analisis de dependencias
+        uses: snyk/actions/node@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          command: test
+          args: --severity-threshold=high
+
+      - name: Generar SBOM (CycloneDX)
+        uses: anchore/sbom-action@v0
+        with:
+          path: ./app
+          format: cyclonedx-json
+          output-file: ../sbom/sbom-cyclonedx.json
+
+      - name: Publicar SBOM como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom/sbom-cyclonedx.json
+
+  docker-build-push:
+    name: Build & Push imagen Docker
+    needs: security-scan
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Definir tag de imagen
+        id: meta
+        run: echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}
+            ${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  container-scan:
+    name: Escaneo de imagen (Trivy + SARIF)
+    needs: docker-build-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Trivy - escaneo de vulnerabilidades
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:${{ needs.docker-build-push.outputs.image_tag }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0' # no bloquea el pipeline; el resultado queda visible en Security
+
+      - name: Publicar resultados en la pestaña Security de GitHub
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-app-image
+
+  terraform-deploy:
+    name: Infraestructura (Terraform - opcion local)
+    needs: docker-build-push
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform/local
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.5'
+
+      - name: Terraform fmt (check)
+        run: terraform fmt -check
+
+      - name: Terraform init
+        run: terraform init
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Terraform plan
+        run: terraform plan -var="image_tag=${{ needs.docker-build-push.outputs.image_tag }}"
+
+      - name: Terraform apply
+        if: github.ref == 'refs/heads/main'
+        run: terraform apply -auto-approve -var="image_tag=${{ needs.docker-build-push.outputs.image_tag }}"
+
+  # ---------------------------------------------------------------------------
+  # A partir de aca: opcion NUBE (AWS), en paralelo a la opcion local de arriba.
+  # Se ejecuta solo si el repositorio define la variable de repo AWS_ENABLED=true
+  # (Settings -> Secrets and variables -> Actions -> Variables), ademas de los
+  # secretos AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY. Esto evita que el pipeline
+  # falle para quienes todavia no configuraron una cuenta de AWS.
+  # ---------------------------------------------------------------------------
+
+  aws-docker-build-push:
+    name: "[AWS] Build & Push imagenes a ECR"
+    needs: security-scan
+    if: vars.AWS_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar credenciales AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Login en ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Definir tag de imagen
+        id: meta
+        run: echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build & push - app
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.ecr-login.outputs.registry }}/${{ vars.AWS_APP_NAME || 'pin-lc-task-api' }}:${{ steps.meta.outputs.tag }}
+
+      - name: Build & push - prometheus (config horneada)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./monitoring/aws/prometheus.Dockerfile
+          push: true
+          tags: ${{ steps.ecr-login.outputs.registry }}/${{ vars.AWS_APP_NAME || 'pin-lc-task-api' }}-prometheus:${{ steps.meta.outputs.tag }}
+
+      - name: Build & push - grafana (config horneada)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./monitoring/aws/grafana.Dockerfile
+          push: true
+          tags: ${{ steps.ecr-login.outputs.registry }}/${{ vars.AWS_APP_NAME || 'pin-lc-task-api' }}-grafana:${{ steps.meta.outputs.tag }}
+
+  terraform-deploy-aws:
+    name: "[AWS] Infraestructura (Terraform - opcion nube)"
+    needs: aws-docker-build-push
+    if: vars.AWS_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform/aws
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar credenciales AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.5'
+
+      - name: Terraform fmt (check)
+        run: terraform fmt -check
+
+      - name: Terraform init
+        run: terraform init
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Terraform plan
+        run: |
+          terraform plan \
+            -var="image_tag=${{ needs.aws-docker-build-push.outputs.image_tag }}" \
+            -var="ecs_execution_role_arn=${{ vars.AWS_ECS_EXECUTION_ROLE_ARN }}" \
+            -var="vpc_id=${{ vars.AWS_VPC_ID }}" \
+            -var='subnet_ids=${{ vars.AWS_SUBNET_IDS }}'
+
+      - name: Terraform apply
+        if: github.ref == 'refs/heads/main'
+        run: |
+          terraform apply -auto-approve \
+            -var="image_tag=${{ needs.aws-docker-build-push.outputs.image_tag }}" \
+            -var="ecs_execution_role_arn=${{ vars.AWS_ECS_EXECUTION_ROLE_ARN }}" \
+            -var="vpc_id=${{ vars.AWS_VPC_ID }}" \
+            -var='subnet_ids=${{ vars.AWS_SUBNET_IDS }}'
+
+  # ---------------------------------------------------------------------------
+  # Resumen final: corre siempre (exito o falla), y si algo del pipeline
+  # fallo, crea automaticamente un Issue en el repo para no tener que ir a
+  # revisar los logs de Actions a mano.
+  # https://github.com/actions/github-script
+  # ---------------------------------------------------------------------------
+
+  summary:
+    name: Resumen del pipeline
+    if: always()
+    needs:
+      - build-and-test
+      - security-scan
+      - docker-build-push
+      - container-scan
+      - terraform-deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Crear Issue si el pipeline fallo
+        if: contains(needs.*.result, 'failure')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Pipeline fallido en ${context.sha.substring(0, 7)} (run #${context.runId})`,
+              body: `El workflow CI/CD Pipeline fallo en uno o mas jobs.\n\n` +
+                    `Commit: ${context.sha}\n` +
+                    `Rama: ${context.ref}\n` +
+                    `Ver detalle: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              labels: ['ci-cd', 'bug']
+            });
+
+      - name: Resultado
+        run: echo "Pipeline finalizado. Ver jobs de arriba para el detalle de cada etapa."

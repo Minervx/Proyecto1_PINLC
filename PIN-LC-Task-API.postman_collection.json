@@ -1,0 +1,71 @@
+{
+  "info": {
+    "name": "PIN-LC Task API",
+    "description": "Colección para probar manualmente la API del Proyecto 1 (PIN). Variable {{base_url}} apunta por defecto a http://localhost:3000, cambiarla por la URL del ALB para probar contra AWS.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:3000" }
+  ],
+  "item": [
+    {
+      "name": "Health check",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/health"
+      }
+    },
+    {
+      "name": "Metricas Prometheus",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/metrics"
+      }
+    },
+    {
+      "name": "Listar tareas",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/api/tasks"
+      }
+    },
+    {
+      "name": "Obtener tarea por ID",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/api/tasks/1"
+      }
+    },
+    {
+      "name": "Crear tarea",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"title\": \"Nueva tarea de prueba\"\n}"
+        },
+        "url": "{{base_url}}/api/tasks"
+      }
+    },
+    {
+      "name": "Actualizar tarea",
+      "request": {
+        "method": "PUT",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"done\": true\n}"
+        },
+        "url": "{{base_url}}/api/tasks/1"
+      }
+    },
+    {
+      "name": "Eliminar tarea",
+      "request": {
+        "method": "DELETE",
+        "url": "{{base_url}}/api/tasks/1"
+      }
+    }
+  ]
+}
