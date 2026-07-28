@@ -233,9 +233,46 @@ jobs:
   # falle para quienes todavia no configuraron una cuenta de AWS.
   # ---------------------------------------------------------------------------
 
+  aws-ecr-bootstrap:
+    name: "[AWS] Crear repositorios ECR"
+    needs: security-scan
+    if: vars.AWS_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform/aws
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar credenciales AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9.5'
+
+      - name: Terraform init
+        run: terraform init
+
+      - name: Crear solo los repositorios ECR (docker push los necesita antes de poder existir)
+        run: |
+          terraform apply -auto-approve \
+            -target=aws_ecr_repository.app \
+            -target=aws_ecr_repository.prometheus \
+            -target=aws_ecr_repository.grafana \
+            -var="ecs_execution_role_arn=${{ vars.AWS_ECS_EXECUTION_ROLE_ARN }}" \
+            -var="vpc_id=${{ vars.AWS_VPC_ID }}" \
+            -var='subnet_ids=${{ vars.AWS_SUBNET_IDS }}'
+
   aws-docker-build-push:
     name: "[AWS] Build & Push imagenes a ECR"
-    needs: security-scan
+    needs: aws-ecr-bootstrap
     if: vars.AWS_ENABLED == 'true'
     runs-on: ubuntu-latest
     outputs:
@@ -352,6 +389,10 @@ jobs:
       - docker-build-push
       - container-scan
       - terraform-deploy
+      - aws-ecr-bootstrap
+      - aws-docker-build-push
+      - terraform-deploy-aws
+
     runs-on: ubuntu-latest
     permissions:
       contents: read
