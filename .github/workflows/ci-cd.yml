@@ -132,7 +132,7 @@ jobs:
       - name: Definir tag y nombre de imagen (minuscula)
         id: meta
         run: |
-          echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "tag=${GITHUB_SHA::7}-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
           echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
       - name: Build & push
