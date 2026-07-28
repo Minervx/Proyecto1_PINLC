@@ -22,13 +22,29 @@ ambos entornos.
 
 | Categoría | Herramienta |
 |---|---|
-| CI/CD | GitHub Actions (7 jobs: local + AWS opcional + resumen automático) |
+| CI/CD | GitHub Actions (9 jobs: local + AWS opcional + resumen automático) |
 | IaC | Terraform (`kreuzwerker/docker` local, `hashicorp/aws` con backend remoto S3 + ALB) |
-| Contenedores | Docker |
-| Seguridad | ESLint + Snyk + SBOM (CycloneDX) + Trivy (reportes SARIF en GitHub Security) |
+| Contenedores | Docker (build multi-stage, usuario no-root, healthcheck) |
+| Seguridad | ESLint + Snyk + SBOM (CycloneDX vía Syft) + Trivy (reportes SARIF en GitHub Security) |
 | Observabilidad | Prometheus + Grafana (local y AWS) |
-| Testing | Jest + Supertest, con umbral de cobertura mínimo (70%) |
+| Testing | Jest + Supertest, con umbral de cobertura mínimo (70% líneas/funciones) |
+| Framework | Express + prom-client |
 | Extras | Colección Postman, script `validate.sh` de chequeo de entorno |
+
+## Aplicación base
+
+API REST de gestión de tareas (Node.js + Express), con persistencia en
+memoria. Se mantuvo simple a propósito: la rúbrica evalúa el pipeline y la
+infraestructura alrededor, no la complejidad funcional de la app. Expone:
+
+| Endpoint | Uso |
+|---|---|
+| `GET /health` | Health check (usado por Docker y por el Load Balancer en AWS) |
+| `GET /metrics` | Métricas en formato Prometheus (vía `prom-client`) |
+| `GET /api/tasks`, `GET /api/tasks/:id` | Listar / obtener tareas |
+| `POST /api/tasks` | Crear tarea |
+| `PUT /api/tasks/:id` | Actualizar tarea |
+| `DELETE /api/tasks/:id` | Eliminar tarea |
 
 ## Estructura del repositorio
 
@@ -47,7 +63,7 @@ ambos entornos.
 │   ├── prometheus.yml, grafana/   # Config para la opción local
 │   └── aws/                       # Dockerfiles + config para Prometheus/Grafana en ECS
 ├── security/README.md          # Resumen de seguridad (detalle en docs/)
-├── sbom/README.md              # Cómo se genera y dónde queda el SBOM
+├── sbom/                        # Instrucciones + SBOM real generado por el pipeline
 └── docs/
     ├── CI_CD_GUIDE.md           # Detalle de cada job del pipeline
     ├── DEPLOYMENT_TERRAFORM.md  # Guía de despliegue (local + AWS)
@@ -67,8 +83,8 @@ Verifica que estén los archivos clave del repo y las herramientas necesarias
 
 ## Cómo correrlo en local (Docker + Terraform)
 
-Requisitos: Docker Engine y Docker Compose instalados (por ejemplo, en una VM
-Ubuntu de VirtualBox), Node.js 20 solo si se quiere correr la app fuera de Docker.
+Requisitos: Docker Desktop (o Docker Engine + Compose), Node.js 20 solo si se
+quiere correr la app fuera de Docker.
 
 ```bash
 # 0. Generar el lockfile una sola vez (requiere internet; no viene incluido)
@@ -84,10 +100,10 @@ curl http://localhost:3000/api/tasks
 # 3. Ver métricas crudas
 curl http://localhost:3000/metrics
 
-# 4. Prometheus
+# 4. Prometheus → Status → Targets (debería verse "UP")
 open http://localhost:9090
 
-# 5. Grafana (usuario/clave: admin/admin la primera vez)
+# 5. Grafana (usuario/clave: admin/admin la primera vez) → Dashboards
 open http://localhost:3001
 ```
 
@@ -102,25 +118,35 @@ terraform apply -var="image_name=pin-lc-task-api" -var="image_tag=local"
 
 ## Cómo correrlo en AWS (opción nube)
 
-Requiere cuenta de AWS, rol IAM de ejecución de ECS, VPC con subnets en al
-menos 2 AZs, AWS CLI configurado, y el bucket S3 del backend ya creado (una
-sola vez). Guía completa paso a paso en `docs/DEPLOYMENT_TERRAFORM.md` y
-`terraform/aws/README.md`. Resumen:
+Requiere: cuenta de AWS, usuario IAM con permisos programáticos, rol de
+ejecución de ECS, VPC con subnets en al menos 2 zonas de disponibilidad
+(lo exige el Load Balancer), AWS CLI configurado, y el bucket S3 del backend
+ya creado (una sola vez). Guía completa paso a paso, incluyendo la política
+IAM exacta necesaria, en `docs/DEPLOYMENT_TERRAFORM.md`,
+`docs/SECURITY_COMPLIANCE.md` y `terraform/aws/README.md`.
+
+Con todo eso configurado, el pipeline hace el resto solo (ver más abajo). Para
+correrlo manualmente en cambio:
 
 ```bash
-# 1. Build & push de las 3 imágenes (app, prometheus, grafana) a ECR
-#    (detalle completo en terraform/aws/README.md)
-
-# 2. Aplicar la infraestructura
+# 1. Crear primero los repositorios ECR (docker push los necesita antes de existir)
 cd terraform/aws
 terraform init
-terraform apply \
-  -var="ecs_execution_role_arn=<ARN>" \
-  -var="vpc_id=<vpc-xxxx>" \
-  -var='subnet_ids=["subnet-aaaa","subnet-bbbb"]' \
-  -var="image_tag=v1"
+terraform apply -auto-approve \
+  -target=aws_ecr_repository.app -target=aws_ecr_repository.prometheus -target=aws_ecr_repository.grafana \
+  -var="ecs_execution_role_arn=<ARN>" -var="vpc_id=<vpc-xxxx>" \
+  -var='subnet_ids=["subnet-aaaa","subnet-bbbb"]'
+cd ../..
 
-# 3. URLs estables (vía ALB, no cambian aunque ECS recree una tarea)
+# 2. Build & push de las 3 imágenes a ECR (detalle completo en terraform/aws/README.md)
+
+# 3. Aplicar el resto de la infraestructura (cluster, Cloud Map, ALB, servicios)
+cd terraform/aws
+terraform apply \
+  -var="ecs_execution_role_arn=<ARN>" -var="vpc_id=<vpc-xxxx>" \
+  -var='subnet_ids=["subnet-aaaa","subnet-bbbb"]' -var="image_tag=v1"
+
+# 4. URLs estables (vía ALB, no cambian aunque ECS recree una tarea)
 terraform output app_url
 terraform output prometheus_url
 terraform output grafana_url
@@ -133,17 +159,25 @@ variables para no dejar nada facturando.
 
 Detalle completo en `docs/CI_CD_GUIDE.md`. Resumen: los jobs de la opción
 local corren siempre; los de AWS solo si se configura la variable de repo
-`AWS_ENABLED=true` (ver `docs/SECURITY_COMPLIANCE.md`).
+`AWS_ENABLED=true` (checklist de secretos/variables en
+`docs/SECURITY_COMPLIANCE.md`).
 
-**Opción local:** `build-and-test` → `security-scan` (Snyk + SBOM) →
-`docker-build-push` (GHCR) → `container-scan` (Trivy, reporte SARIF en la
-pestaña Security) → `terraform-deploy` (`plan` siempre, `apply` en `main`).
+**Opción local:** `build-and-test` (lint + tests) → `security-scan` (Snyk +
+SBOM) → `docker-build-push` (GHCR) → `container-scan` (Trivy, reporte SARIF
+en la pestaña Security) → `terraform-deploy` (`plan` siempre, `apply` en
+`main`).
 
-**Opción AWS** (si `AWS_ENABLED=true`): `aws-docker-build-push` (ECR, 3
-imágenes) → `terraform-deploy-aws` (ECS Fargate + ALB + Cloud Map).
+**Opción AWS** (si `AWS_ENABLED=true`): `aws-ecr-bootstrap` (crea primero los
+3 repositorios ECR, necesarios antes de poder publicar ninguna imagen) →
+`aws-docker-build-push` (build & push de las 3 imágenes) →
+`terraform-deploy-aws` (cluster ECS, Cloud Map, ALB y servicios).
 
 **Al final, siempre:** `summary` — si algún job falló, crea automáticamente
 un Issue en el repo con el link directo a la ejecución.
+
+Cada imagen se tagea con el hash corto del commit **más el número de
+corrida** (`ej: 1d0bac0-14`), no solo el commit, para que reintentar el
+pipeline sobre el mismo código no choque con los tags inmutables de ECR.
 
 ## Fuentes y documentación oficial utilizada
 
@@ -163,9 +197,3 @@ un Issue en el repo con el link directo a la ejecución.
 - Trivy Action: https://github.com/aquasecurity/trivy-action
 - ESLint: https://eslint.org/docs/latest/
 
-## Antes de entregar
-
-Ver `docs/entregables-checklist.md`: hay evidencias que deben generarse
-corriendo el pipeline/stack al menos una vez (imagen Docker publicada, SBOM
-real, capturas de los dashboards de Grafana en local y en AWS), ya que no
-corresponde fabricarlas manualmente para la entrega.
