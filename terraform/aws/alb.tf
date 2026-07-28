@@ -54,17 +54,17 @@ resource "aws_security_group" "ecs_tasks" {
   ingress {
     description     = "Desde el ALB"
     from_port       = 3000
-    to_port          = 3000
-    protocol         = "tcp"
-    security_groups  = [aws_security_group.alb.id]
+    to_port         = 3000
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
   }
 
   ingress {
     description     = "Desde el ALB (Prometheus)"
     from_port       = 9090
-    to_port          = 9090
-    protocol         = "tcp"
-    security_groups  = [aws_security_group.alb.id]
+    to_port         = 9090
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
   }
 
   # Trafico interno entre tareas (Cloud Map: app <-> prometheus <-> grafana)
