@@ -101,7 +101,7 @@ jobs:
         with:
           path: ./app
           format: cyclonedx-json
-          output-file: ../sbom/sbom-cyclonedx.json
+          output-file: sbom/sbom-cyclonedx.json
 
       - name: Publicar SBOM como artefacto
         uses: actions/upload-artifact@v4
